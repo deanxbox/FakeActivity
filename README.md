@@ -5,6 +5,8 @@ A custom Vencord plugin that lets you fake a Discord game activity with custom a
 ## Features
 
 * Fake any Discord game activity
+* Choose Playing, Listening or Watching
+* Optionally override a Larped (copied) activity with your own fields
 * Set custom:
 
   * Application name

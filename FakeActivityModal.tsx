@@ -7,15 +7,25 @@
 import "./style.css";
 
 import { classNameFactory } from "@utils/css";
-import { ModalCloseButton, ModalContent, ModalHeader, ModalProps, ModalRoot, ModalSize, openModal } from "@utils/modal";
-import { React, Text, useEffect, useMemo, useState } from "@webpack/common";
+import type { RenderModalProps } from "@vencord/discord-types";
+import { Modal, openModal, React, useEffect, useMemo, useState } from "@webpack/common";
 
-import { defaultSettings, setFakeActivity, settings } from ".";
+import { defaultSettings, getSettingsError, isSpotifyConfig, setManualFakeActivity, settings } from ".";
 import { discoverApplications, KnownApp, searchDiscordApplications } from "./applicationIds";
 
 const cl = classNameFactory("vc-fakeactivity-");
+const SPOTIFY_APPLICATION_IDS = new Set(["321895300310712320"]);
+const ACTIVITY_TYPES = [
+    { type: 0, label: "Playing", verb: "Playing" },
+    { type: 2, label: "Listening", verb: "Listening to" },
+    { type: 3, label: "Watching", verb: "Watching" }
+];
 
 type DraftSettings = typeof defaultSettings;
+
+function isSpotifyDraft(draft: DraftSettings) {
+    return isSpotifyConfig(draft.appName, draft.appId);
+}
 
 function getDraftSettings(): DraftSettings {
     return {
@@ -25,6 +35,8 @@ function getDraftSettings(): DraftSettings {
         appIcon: settings.store.appIcon ?? defaultSettings.appIcon,
         details: settings.store.details ?? defaultSettings.details,
         state: settings.store.state ?? defaultSettings.state,
+        activityType: settings.store.activityType ?? defaultSettings.activityType,
+        overrideCopiedValues: settings.store.overrideCopiedValues ?? defaultSettings.overrideCopiedValues,
         elapsedSeconds: settings.store.elapsedSeconds
             ?? (typeof settings.store.elapsedMinutes === "number" ? settings.store.elapsedMinutes * 60 : defaultSettings.elapsedSeconds)
     };
@@ -200,7 +212,10 @@ function GameApplicationPicker(props: {
 
     const options = useMemo(() => {
         const normalizedQuery = query.trim().toLowerCase();
-        const merged = mergeApps(remoteApps, apps);
+        const merged = mergeApps(remoteApps, apps).filter(app =>
+            !app.name.toLowerCase().includes("spotify")
+            && !SPOTIFY_APPLICATION_IDS.has(app.id)
+        );
 
         if (!normalizedQuery) return merged.slice(0, 50);
 
@@ -270,6 +285,35 @@ function ActivitySettingsForm(props: {
 }) {
     return (
         <div className={cl("tab-content")}>
+            <div className={cl("single", "wide")}>
+                <span className={cl("label")}>Activity type</span>
+                <div className={cl("type-row")}>
+                    {ACTIVITY_TYPES.map(t => (
+                        <button
+                            key={t.type}
+                            type="button"
+                            className={`${cl("app-option")} ${props.draft.activityType === t.type ? cl("app-option-selected") : ""}`}
+                            onClick={() => props.setDraft(draft => ({ ...draft, activityType: t.type }))}
+                        >
+                            {t.label}
+                        </button>
+                    ))}
+                </div>
+            </div>
+            <label className={cl("single", "wide")}>
+                <span className={cl("label")}>
+                    <input
+                        type="checkbox"
+                        checked={props.draft.overrideCopiedValues}
+                        onChange={event => {
+                            const { checked } = event.currentTarget;
+                            props.setDraft(draft => ({ ...draft, overrideCopiedValues: checked }));
+                        }}
+                    />
+                    {" "}Override copied (Larp) values with these fields
+                </span>
+<span className={cl("hint")}>When on (and Fake Activity is enabled), your fields replace the matching values of a Larped activity while it runs.</span>
+            </label>
             <GameApplicationPicker {...props} />
             <div className={cl("pair")}>
                 <TextSetting
@@ -302,7 +346,7 @@ function ActivitySettingsForm(props: {
             </div>
             <TimeSetting
                 {...props}
-                label="Playing for"
+                label="Elapsed time"
                 suffix="Set hours, minutes, and seconds to 0 to hide the elapsed timer."
             />
         </div>
@@ -347,7 +391,7 @@ function ActivityPreview({ draft }: { draft: DraftSettings; }) {
                     <span>{imageUrl ? "" : "No image"}</span>
                 </div>
                 <div className={cl("preview-body")}>
-                    <strong>{`Playing ${draft.appName || defaultSettings.appName}`}</strong>
+<strong>{`${ACTIVITY_TYPES.find(t => t.type === draft.activityType)?.verb ?? "Playing"} ${draft.appName || defaultSettings.appName}`}</strong>
                     <span>{draft.details || "No details set"}</span>
                     <span>{draft.state || "No state set"}</span>
                     <span>{getPreviewTimeText(draft)}</span>
@@ -359,20 +403,31 @@ function ActivityPreview({ draft }: { draft: DraftSettings; }) {
 
 function FakeActivitySettingsInner({ onClose }: { onClose: () => void; }) {
     const [draft, setDraft] = useState(getDraftSettings);
+    const spotifyBlocked = isSpotifyDraft(draft);
+
+    const draftError = getSettingsError(draft);
 
     function commitDraft(isActive: boolean) {
+        if (isActive && (spotifyBlocked || draftError)) return;
+
         for (const [key, value] of Object.entries({ ...draft, isActive })) {
             if (settings.store[key] !== value)
                 settings.store[key] = value;
         }
 
-        setFakeActivity(isActive);
+        setManualFakeActivity(isActive);
         onClose();
     }
 
     return (
         <div className={cl("modal-content")}>
             <ActivitySettingsForm draft={draft} setDraft={setDraft} />
+
+            {spotifyBlocked && (
+                <span className={cl("error")}>
+                    Spotify can only be copied through Larp Activity, not configured manually.
+                </span>
+            )}
 
             <ActivityPreview draft={draft} />
 
@@ -387,6 +442,7 @@ function FakeActivitySettingsInner({ onClose }: { onClose: () => void; }) {
                 <button
                     type="button"
                     className={`${cl("plain-button")} ${cl("plain-button-active")}`}
+                    disabled={spotifyBlocked || !!draftError}
                     onClick={() => commitDraft(true)}
                 >
                     Apply & Enable
@@ -396,23 +452,14 @@ function FakeActivitySettingsInner({ onClose }: { onClose: () => void; }) {
     );
 }
 
-function FakeActivityModalWrapper({ rootProps }: { rootProps: ModalProps; }) {
+function FakeActivityModalWrapper(props: RenderModalProps) {
     return (
-        <ModalRoot {...rootProps} size={ModalSize.LARGE}>
-            <ModalHeader>
-                <Text variant="heading-lg/semibold" style={{ flexGrow: 1 }}>
-                    Fake Activity Settings
-                </Text>
-                <ModalCloseButton onClick={rootProps.onClose} />
-            </ModalHeader>
-
-            <ModalContent>
-                <FakeActivitySettingsInner onClose={rootProps.onClose} />
-            </ModalContent>
-        </ModalRoot>
+        <Modal {...props} size="lg" title="Fake Activity Settings">
+            <FakeActivitySettingsInner onClose={props.onClose} />
+        </Modal>
     );
 }
 
 export function openFakeActivityModal() {
-    openModal(props => <FakeActivityModalWrapper rootProps={props} />);
+    openModal(props => <FakeActivityModalWrapper {...props} />);
 }
